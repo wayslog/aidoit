@@ -51,8 +51,8 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             source_event_id TEXT NOT NULL,
             created_at TEXT NOT NULL,
             PRIMARY KEY (repo_root, source_id, target_id, kind),
-            FOREIGN KEY (source_id) REFERENCES nodes(id),
-            FOREIGN KEY (target_id) REFERENCES nodes(id)
+            FOREIGN KEY (source_id) REFERENCES nodes(id) ON DELETE CASCADE,
+            FOREIGN KEY (target_id) REFERENCES nodes(id) ON DELETE CASCADE
         );
         ",
     )?;

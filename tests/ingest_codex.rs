@@ -72,9 +72,13 @@ fn 增量导入只吸收新增事件() -> Result<()> {
     assert_eq!(first.inserted_raw_events, 12);
     assert_eq!(repeated.inserted_raw_events, 0);
 
-    fs::OpenOptions::new().append(true).open(&transcript)?.write_all(
-        b"{\"timestamp\":\"2026-04-14T04:00:03.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"\\u72b6\\u6001\\uff1abranch:\\u8865\\u5145 ingest fixture -> ready\\n\\u72b6\\u6001\\uff1aprinciple:transcript \\u662f\\u6743\\u5a01\\u6e90 -> confirmed\",\"phase\":\"commentary\",\"memory_citation\":null}}\n",
-    )?;
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)?
+        .write_all(
+            "{\"timestamp\":\"2026-04-14T04:00:03.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"状态：branch:补充 ingest fixture -> ready\\n状态：principle:transcript 是权威源 -> confirmed\",\"phase\":\"commentary\",\"memory_citation\":null}}\n"
+                .as_bytes(),
+        )?;
 
     let appended = import_codex_transcript(&mut store, "/repo/demo", &transcript)?;
     let branches = store.list_nodes_by_kind(NodeKind::Branch)?;

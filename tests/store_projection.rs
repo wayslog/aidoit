@@ -111,13 +111,70 @@ fn relations_表包含节点外键约束() -> Result<()> {
     store.initialize()?;
 
     let conn = Connection::open(&db_path)?;
-    let fk_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_foreign_key_list('relations')",
-        [],
-        |row| row.get(0),
+    let mut stmt = conn.prepare(
+        "SELECT \"from\", on_delete FROM pragma_foreign_key_list('relations') ORDER BY \"from\"",
     )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut foreign_keys = Vec::new();
+    for row in rows {
+        foreign_keys.push(row?);
+    }
 
-    assert_eq!(fk_count, 2);
+    assert_eq!(
+        foreign_keys,
+        vec![
+            ("source_id".to_string(), "CASCADE".to_string()),
+            ("target_id".to_string(), "CASCADE".to_string()),
+        ]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn 删除节点时会级联删除_relations() -> Result<()> {
+    let temp = tempdir()?;
+    let db_path = temp.path().join("cascade.db");
+    let mut store = Store::open(&db_path)?;
+    store.initialize()?;
+    let checkpoint =
+        IngestCheckpoint::new("/repo/demo", "/tmp/demo.jsonl", 3, "2026-04-14T12:00:03Z");
+    let source = node_event(
+        "evt-cascade-1",
+        "task-cascade-1",
+        NodeKind::Task,
+        NodeState::Work(WorkState::Ready),
+        1,
+        "2026-04-14T12:00:00Z",
+    );
+    let target = node_event(
+        "evt-cascade-2",
+        "branch-cascade-1",
+        NodeKind::Branch,
+        NodeState::Work(WorkState::Ready),
+        2,
+        "2026-04-14T12:00:01Z",
+    );
+    let relation = relation_event(
+        "evt-cascade-3",
+        "task-cascade-1",
+        "branch-cascade-1",
+        3,
+        "2026-04-14T12:00:02Z",
+    );
+
+    store.ingest_batch(&[source, target, relation], &checkpoint)?;
+    drop(store);
+
+    let conn = Connection::open(&db_path)?;
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
+    conn.execute("DELETE FROM nodes WHERE id = ?1", ["task-cascade-1"])?;
+    let relation_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM relations", [], |row| row.get(0))?;
+
+    assert_eq!(relation_count, 0);
 
     Ok(())
 }
