@@ -40,19 +40,24 @@ enum Commands {
     Agenda,
     Principles,
     Inspect {
+        #[arg(value_name = "ID_OR_PREFIX")]
         id: String,
     },
     SetStatus {
+        #[arg(value_name = "ID_OR_PREFIX")]
         id: String,
         status: String,
     },
     Confirm {
+        #[arg(value_name = "ID_OR_PREFIX")]
         id: String,
     },
     Reject {
+        #[arg(value_name = "ID_OR_PREFIX")]
         id: String,
     },
     Promote {
+        #[arg(value_name = "ID_OR_PREFIX")]
         id: String,
         #[arg(long)]
         title: Option<String>,
@@ -80,20 +85,28 @@ pub fn run() -> Result<()> {
         Commands::Principles => render_principles(&store)?,
         Commands::Inspect { id } => render_inspect(&store, &id)?,
         Commands::SetStatus { id, status } => {
-            apply_work_status(&mut store, &context, &id, &status)?;
-            format!("状态已更新：{id} -> {status}")
+            let node = resolve_node(&store, &id)?;
+            apply_work_status(&mut store, &context, &node, &status)?;
+            format!(
+                "状态已更新：{} ({}) -> {status}",
+                node.title,
+                short_id(&node.id)
+            )
         }
         Commands::Confirm { id } => {
-            apply_review_status(&mut store, &context, &id, ReviewState::Confirmed)?;
-            format!("已确认：{id}")
+            let node = resolve_node(&store, &id)?;
+            apply_review_status(&mut store, &context, &node, ReviewState::Confirmed)?;
+            format!("已确认：{} ({})", node.title, short_id(&node.id))
         }
         Commands::Reject { id } => {
-            apply_review_status(&mut store, &context, &id, ReviewState::Rejected)?;
-            format!("已拒绝：{id}")
+            let node = resolve_node(&store, &id)?;
+            apply_review_status(&mut store, &context, &node, ReviewState::Rejected)?;
+            format!("已拒绝：{} ({})", node.title, short_id(&node.id))
         }
         Commands::Promote { id, title } => {
-            promote_branch(&mut store, &context, &id, title.as_deref())?;
-            format!("已提升为任务：{id}")
+            let node = resolve_node(&store, &id)?;
+            promote_branch(&mut store, &context, &node, title.as_deref())?;
+            format!("已提升为任务：{} ({})", node.title, short_id(&node.id))
         }
     };
 
@@ -171,7 +184,7 @@ fn render_status(store: &Store) -> Result<String> {
     let mut lines = Vec::new();
     lines.push("主线任务".to_string());
     if let Some(task) = tasks.first() {
-        lines.push(format!("- {} [{}]", task.title, display_state(&task.state)));
+        lines.push(format!("- {}", format_node(task, false)));
     } else {
         lines.push("- 暂无任务".to_string());
     }
@@ -181,7 +194,7 @@ fn render_status(store: &Store) -> Result<String> {
         lines.push("- 暂无阻塞项".to_string());
     } else {
         for node in blocked {
-            lines.push(format!("- {} {}", kind_name(node.kind), node.title));
+            lines.push(format!("- {}", format_node(node, true)));
         }
     }
     lines.push(String::new());
@@ -194,7 +207,7 @@ fn render_status(store: &Store) -> Result<String> {
         lines.push("- 暂无候选分支".to_string());
     } else {
         for node in candidate_branches {
-            lines.push(format!("- {} [{}]", node.title, display_state(&node.state)));
+            lines.push(format!("- {}", format_node(node, false)));
         }
     }
 
@@ -237,20 +250,11 @@ fn render_tree(store: &Store) -> Result<String> {
 
     let mut lines = vec!["任务树".to_string()];
     for task in root_tasks {
-        lines.push(format!(
-            "- task {} [{}]",
-            task.title,
-            display_state(&task.state)
-        ));
+        lines.push(format!("- {}", format_node(task, true)));
         let mut children = task_children.remove(&task.id).unwrap_or_default();
         children.sort_by(|left, right| left.title.cmp(&right.title));
         for child in children {
-            lines.push(format!(
-                "  - {} {} [{}]",
-                kind_name(child.kind),
-                child.title,
-                display_state(&child.state)
-            ));
+            lines.push(format!("  - {}", format_node(child, true)));
         }
     }
 
@@ -285,12 +289,7 @@ fn render_agenda(store: &Store) -> Result<String> {
         lines.push("- 暂无可执行项".to_string());
     } else {
         for node in agenda {
-            lines.push(format!(
-                "- {} {} [{}]",
-                kind_name(node.kind),
-                node.title,
-                display_state(&node.state)
-            ));
+            lines.push(format!("- {}", format_node(node, true)));
         }
     }
     Ok(lines.join("\n"))
@@ -312,21 +311,14 @@ fn render_principles(store: &Store) -> Result<String> {
         lines.push("- 暂无已确认原则或协定".to_string());
     } else {
         for node in confirmed {
-            lines.push(format!(
-                "- {} {} [{}]",
-                kind_name(node.kind),
-                node.title,
-                display_state(&node.state)
-            ));
+            lines.push(format!("- {}", format_node(node, true)));
         }
     }
     Ok(lines.join("\n"))
 }
 
-fn render_inspect(store: &Store, node_id: &str) -> Result<String> {
-    let node = store
-        .get_node(node_id)?
-        .ok_or_else(|| anyhow::anyhow!("节点不存在: {node_id}"))?;
+fn render_inspect(store: &Store, node_ref: &str) -> Result<String> {
+    let node = resolve_node(store, node_ref)?;
     let nodes = store.list_nodes()?;
     let relations = store.list_relations()?;
     let node_map = node_map(&nodes);
@@ -378,7 +370,7 @@ fn render_inspect(store: &Store, node_id: &str) -> Result<String> {
     lines.push("历史".to_string());
     let history: Vec<_> = events
         .into_iter()
-        .filter(|event| event_mentions_node(event, node_id))
+        .filter(|event| event_mentions_node(event, &node.id))
         .collect();
     if history.is_empty() {
         lines.push("- 暂无历史".to_string());
@@ -398,19 +390,16 @@ fn render_inspect(store: &Store, node_id: &str) -> Result<String> {
 fn apply_work_status(
     store: &mut Store,
     context: &AppContext,
-    node_id: &str,
+    node: &NodeView,
     status: &str,
 ) -> Result<()> {
-    let node = store
-        .get_node(node_id)?
-        .ok_or_else(|| anyhow::anyhow!("节点不存在: {node_id}"))?;
     if !matches!(node.kind, NodeKind::Task | NodeKind::Branch) {
         bail!("只有 Task / Branch 支持工作流状态更新");
     }
     let state = NodeState::Work(parse_work_state(status)?);
     let event = manual_state_event(
         context.repo_root.to_string_lossy().as_ref(),
-        node_id,
+        &node.id,
         state,
         "CLI 手动更新状态",
     );
@@ -420,18 +409,15 @@ fn apply_work_status(
 fn apply_review_status(
     store: &mut Store,
     context: &AppContext,
-    node_id: &str,
+    node: &NodeView,
     status: ReviewState,
 ) -> Result<()> {
-    let node = store
-        .get_node(node_id)?
-        .ok_or_else(|| anyhow::anyhow!("节点不存在: {node_id}"))?;
     if !matches!(node.kind, NodeKind::Principle | NodeKind::Agreement) {
         bail!("只有 Principle / Agreement 支持确认流转");
     }
     let event = manual_state_event(
         context.repo_root.to_string_lossy().as_ref(),
-        node_id,
+        &node.id,
         NodeState::Review(status),
         "CLI 手动确认状态",
     );
@@ -441,12 +427,9 @@ fn apply_review_status(
 fn promote_branch(
     store: &mut Store,
     context: &AppContext,
-    branch_id: &str,
+    branch: &NodeView,
     title: Option<&str>,
 ) -> Result<()> {
-    let branch = store
-        .get_node(branch_id)?
-        .ok_or_else(|| anyhow::anyhow!("分支不存在: {branch_id}"))?;
     if branch.kind != NodeKind::Branch {
         bail!("只有 Branch 可以提升为任务");
     }
@@ -496,7 +479,7 @@ fn promote_branch(
         RawEventKind::RelationCaptured,
         RawEventPayload::RelationCaptured {
             source_id: task_id,
-            target_id: branch_id.to_string(),
+            target_id: branch.id.clone(),
             relation: RelationKind::DerivedFrom,
         },
     );
@@ -651,6 +634,52 @@ fn agenda_items<'a>(nodes: &'a [NodeView], relations: &'a [RelationView]) -> Vec
 
 fn node_map(nodes: &[NodeView]) -> HashMap<&str, &NodeView> {
     nodes.iter().map(|node| (node.id.as_str(), node)).collect()
+}
+
+const SHORT_ID_LEN: usize = 12;
+
+fn format_node(node: &NodeView, include_kind: bool) -> String {
+    let prefix = if include_kind {
+        format!("{} ", kind_name(node.kind))
+    } else {
+        String::new()
+    };
+    format!(
+        "{}{} [{}] (id: {})",
+        prefix,
+        node.title,
+        display_state(&node.state),
+        short_id(&node.id)
+    )
+}
+
+fn short_id(id: &str) -> &str {
+    &id[..id.len().min(SHORT_ID_LEN)]
+}
+
+fn resolve_node(store: &Store, node_ref: &str) -> Result<NodeView> {
+    let nodes = store.list_nodes()?;
+    if let Some(node) = nodes.iter().find(|node| node.id == node_ref) {
+        return Ok(node.clone());
+    }
+
+    let matches: Vec<_> = nodes
+        .iter()
+        .filter(|node| node.id.starts_with(node_ref))
+        .cloned()
+        .collect();
+    match matches.as_slice() {
+        [node] => Ok(node.clone()),
+        [] => bail!("节点不存在: {node_ref}"),
+        _ => {
+            let options = matches
+                .iter()
+                .map(|node| format!("- {}", format_node(node, true)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!("节点前缀不唯一: {node_ref}\n{options}");
+        }
+    }
 }
 
 fn event_mentions_node(event: &StoredEvent, node_id: &str) -> bool {
