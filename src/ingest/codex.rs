@@ -105,6 +105,8 @@ pub fn find_latest_transcript_for_repo(repo_root: &Path) -> Result<Option<PathBu
     if !sessions_root.exists() {
         return Ok(None);
     }
+    let normalized_repo_root =
+        fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
 
     let mut stack = vec![sessions_root];
     let mut candidates = Vec::new();
@@ -131,7 +133,7 @@ pub fn find_latest_transcript_for_repo(repo_root: &Path) -> Result<Option<PathBu
                 .get("payload")
                 .and_then(|payload| payload.get("cwd"))
                 .and_then(Value::as_str);
-            if cwd != Some(repo_root.to_string_lossy().as_ref()) {
+            if !cwd_matches_repo_root(cwd, &normalized_repo_root) {
                 continue;
             }
             let modified_at = entry.metadata()?.modified()?;
@@ -141,4 +143,13 @@ pub fn find_latest_transcript_for_repo(repo_root: &Path) -> Result<Option<PathBu
 
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(candidates.pop().map(|(_, path)| path))
+}
+
+fn cwd_matches_repo_root(cwd: Option<&str>, repo_root: &Path) -> bool {
+    let Some(cwd) = cwd else {
+        return false;
+    };
+    let cwd_path = Path::new(cwd);
+    let normalized_cwd = fs::canonicalize(cwd_path).unwrap_or_else(|_| cwd_path.to_path_buf());
+    normalized_cwd == repo_root
 }

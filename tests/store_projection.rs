@@ -106,6 +106,40 @@ fn 重复摄入同一事件不会重复写入_raw_events() -> Result<()> {
 }
 
 #[test]
+fn 重复_node_capture_不会回退已更新状态() -> Result<()> {
+    let mut store = Store::open_in_memory()?;
+    store.initialize()?;
+    let checkpoint =
+        IngestCheckpoint::new("/repo/demo", "/tmp/demo.jsonl", 3, "2026-04-14T12:00:03Z");
+    let initial = node_event(
+        "evt-reset-1",
+        "branch-keep-ready",
+        NodeKind::Branch,
+        NodeState::Work(WorkState::Parked),
+    );
+    let updated = state_event(
+        "evt-reset-2",
+        "branch-keep-ready",
+        NodeState::Work(WorkState::Ready),
+    );
+    let repeated_capture = node_event(
+        "evt-reset-3",
+        "branch-keep-ready",
+        NodeKind::Branch,
+        NodeState::Work(WorkState::Parked),
+    );
+
+    store.ingest_batch(&[initial, updated, repeated_capture], &checkpoint)?;
+
+    let branch = store
+        .get_node("branch-keep-ready")?
+        .expect("分支节点应存在");
+    assert_eq!(branch.state, NodeState::Work(WorkState::Ready));
+
+    Ok(())
+}
+
+#[test]
 fn checkpoint_会被最新行号覆盖() -> Result<()> {
     let mut store = Store::open_in_memory()?;
     store.initialize()?;

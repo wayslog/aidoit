@@ -102,7 +102,8 @@ pub fn run() -> Result<()> {
 }
 
 fn resolve_context(cli: &Cli) -> Result<AppContext> {
-    let repo_root = cli.repo_root.clone().unwrap_or(std::env::current_dir()?);
+    let start_dir = cli.repo_root.clone().unwrap_or(std::env::current_dir()?);
+    let repo_root = normalize_repo_root(&start_dir);
     let db_path = match &cli.db_path {
         Some(path) => path.clone(),
         None => default_db_path(&repo_root)?,
@@ -116,6 +117,21 @@ fn resolve_context(cli: &Cli) -> Result<AppContext> {
         db_path,
         transcript: cli.transcript.clone(),
     })
+}
+
+fn normalize_repo_root(path: &Path) -> PathBuf {
+    let normalized = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    discover_repo_root(&normalized).unwrap_or(normalized)
+}
+
+fn discover_repo_root(path: &Path) -> Option<PathBuf> {
+    let start = if path.is_dir() { path } else { path.parent()? };
+    for ancestor in start.ancestors() {
+        if ancestor.join(".git").exists() {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
 }
 
 fn default_db_path(repo_root: &Path) -> Result<PathBuf> {

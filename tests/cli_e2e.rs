@@ -3,6 +3,7 @@ use std::{fs, path::PathBuf};
 use anyhow::Result;
 use assert_cmd::Command;
 use predicates::prelude::*;
+use serde_json::json;
 use tempfile::tempdir;
 
 use aidoit::domain::{NodeKind, stable_node_id};
@@ -134,6 +135,67 @@ fn set_status_与_promote_会更新_tree_和_inspect() -> Result<()> {
         .success()
         .stdout(predicate::str::contains("derived_from"))
         .stdout(predicate::str::contains("补充 ingest fixture"));
+
+    Ok(())
+}
+
+#[test]
+fn 从子目录启动也会归一到仓库根() -> Result<()> {
+    let home = tempdir()?;
+    let repo_root = home.path().join("demo-repo");
+    let subdir = repo_root.join("src");
+    let session_dir = home.path().join(".codex").join("sessions").join("demo");
+    fs::create_dir_all(repo_root.join(".git"))?;
+    fs::create_dir_all(&subdir)?;
+    fs::create_dir_all(&session_dir)?;
+
+    let transcript = session_dir.join("session.jsonl");
+    let root_string = fs::canonicalize(&repo_root)?.to_string_lossy().to_string();
+    let session_meta = json!({
+        "timestamp": "2026-04-14T04:00:00.000Z",
+        "type": "session_meta",
+        "payload": {
+            "id": "session-1",
+            "timestamp": "2026-04-14T04:00:00.000Z",
+            "cwd": root_string,
+        }
+    });
+    let event_msg = json!({
+        "timestamp": "2026-04-14T04:00:01.000Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "user_message",
+            "message": "任务：完成 transcript 闭环\n分支：实现 raw_events\n归属：branch:实现 raw_events -> task:完成 transcript 闭环\n状态：branch:实现 raw_events -> ready",
+            "images": [],
+            "local_images": [],
+            "text_elements": []
+        }
+    });
+    fs::write(&transcript, format!("{session_meta}\n{event_msg}\n"))?;
+
+    let mut root_command = Command::cargo_bin("aidoit")?;
+    root_command
+        .current_dir(&repo_root)
+        .env("HOME", home.path())
+        .env("XDG_DATA_HOME", home.path().join(".local").join("share"))
+        .arg("status");
+    root_command
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("完成 transcript 闭环"))
+        .stdout(predicate::str::contains("实现 raw_events"));
+
+    let mut subdir_command = Command::cargo_bin("aidoit")?;
+    subdir_command
+        .current_dir(&subdir)
+        .env("HOME", home.path())
+        .env("XDG_DATA_HOME", home.path().join(".local").join("share"))
+        .arg("status");
+    subdir_command
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("完成 transcript 闭环"))
+        .stdout(predicate::str::contains("实现 raw_events"));
 
     Ok(())
 }

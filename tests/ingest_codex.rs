@@ -91,6 +91,39 @@ fn 增量导入只吸收新增事件() -> Result<()> {
 }
 
 #[test]
+fn 同一条消息里前置状态和依赖也能成功导入() -> Result<()> {
+    let temp = tempdir()?;
+    let transcript = temp.path().join("reordered.jsonl");
+    fs::write(
+        &transcript,
+        concat!(
+            "{\"timestamp\":\"2026-04-14T04:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"session-1\",\"cwd\":\"/repo/demo\"}}\n",
+            "{\"timestamp\":\"2026-04-14T04:00:01.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"状态：branch:实现 raw_events -> ready\\n依赖：branch:实现 CLI 视图 -> branch:实现 raw_events\\n分支：实现 raw_events\\n分支：实现 CLI 视图\",\"phase\":\"commentary\",\"memory_citation\":null}}\n"
+        ),
+    )?;
+
+    let mut store = Store::open_in_memory()?;
+    store.initialize()?;
+
+    let report = import_codex_transcript(&mut store, "/repo/demo", &transcript)?;
+    let branches = store.list_nodes_by_kind(NodeKind::Branch)?;
+    let relations = store.list_relations()?;
+
+    assert_eq!(report.inserted_raw_events, 4);
+    assert_eq!(branches.len(), 2);
+    assert!(branches.iter().any(|node| {
+        node.title == "实现 raw_events" && node.state == NodeState::Work(WorkState::Ready)
+    }));
+    assert!(
+        relations
+            .iter()
+            .any(|relation| relation.relation == aidoit::domain::RelationKind::DependsOn)
+    );
+
+    Ok(())
+}
+
+#[test]
 fn 损坏的_transcript_会返回行号错误() -> Result<()> {
     let temp = tempdir()?;
     let transcript = temp.path().join("broken.jsonl");

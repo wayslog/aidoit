@@ -46,10 +46,7 @@ pub fn apply_event(tx: &Transaction<'_>, event: &StoredEvent) -> Result<()> {
                     repo_root = excluded.repo_root,
                     kind = excluded.kind,
                     title = excluded.title,
-                    state_group = excluded.state_group,
-                    state_value = excluded.state_value,
                     summary = excluded.summary,
-                    source_event_id = excluded.source_event_id,
                     last_event_id = excluded.last_event_id,
                     updated_at = excluded.updated_at
                 ",

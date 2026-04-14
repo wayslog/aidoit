@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::domain::{NodeKind, StoredEvent};
+use crate::domain::{NodeKind, RawEventPayload, StoredEvent};
 
 pub use raw_events::{IngestCheckpoint, load_checkpoint};
 pub use read_models::{NodeView, RelationView};
@@ -52,12 +52,23 @@ impl Store {
     ) -> Result<IngestOutcome> {
         let tx = self.conn.transaction()?;
         let mut inserted_raw_events = 0;
+        let mut pending_projection = Vec::new();
 
         for event in events {
             if raw_events::insert_raw_event(&tx, event)? {
-                read_models::apply_event(&tx, event)?;
                 inserted_raw_events += 1;
+                pending_projection.push(event);
             }
+        }
+
+        pending_projection.sort_by(|left, right| {
+            event_priority(left)
+                .cmp(&event_priority(right))
+                .then(left.source_line_no.cmp(&right.source_line_no))
+                .then(left.event_id.cmp(&right.event_id))
+        });
+        for event in pending_projection {
+            read_models::apply_event(&tx, event)?;
         }
 
         raw_events::upsert_checkpoint(&tx, checkpoint)?;
@@ -102,5 +113,13 @@ impl Store {
 
     pub fn list_relations(&self) -> Result<Vec<RelationView>> {
         read_models::list_relations(&self.conn)
+    }
+}
+
+fn event_priority(event: &StoredEvent) -> u8 {
+    match event.payload {
+        RawEventPayload::NodeCaptured { .. } => 0,
+        RawEventPayload::StateChanged { .. } => 1,
+        RawEventPayload::RelationCaptured { .. } => 2,
     }
 }
