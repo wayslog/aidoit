@@ -28,12 +28,7 @@ pub fn import_codex_transcript(
     let checkpoint = store
         .checkpoint(repo_root, &transcript_key)?
         .unwrap_or_else(|| {
-            IngestCheckpoint::new(
-                repo_root,
-                &transcript_key,
-                0,
-                "1970-01-01T00:00:00Z",
-            )
+            IngestCheckpoint::new(repo_root, &transcript_key, 0, "1970-01-01T00:00:00Z")
         });
     let parsed = codex::read_new_messages(transcript_path, checkpoint.last_line_no)
         .with_context(|| format!("读取 transcript 失败: {}", transcript_path.display()))?;
