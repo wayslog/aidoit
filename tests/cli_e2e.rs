@@ -100,6 +100,7 @@ fn set_status_与_promote_会更新_tree_和_inspect() -> Result<()> {
     let (_temp, transcript, db_path) = prepare_paths()?;
     let branch_id = stable_node_id(REPO_ROOT, NodeKind::Branch, "补充 ingest fixture");
     let task_id = stable_node_id(REPO_ROOT, NodeKind::Task, "补充 ingest fixture");
+    let task_short_id = &task_id[..12];
 
     base_command(&transcript, &db_path)?
         .arg("set-status")
@@ -120,7 +121,8 @@ fn set_status_与_promote_会更新_tree_和_inspect() -> Result<()> {
         .arg(&branch_id)
         .assert()
         .success()
-        .stdout(predicate::str::contains("已提升为任务"));
+        .stdout(predicate::str::contains("已提升为任务"))
+        .stdout(predicate::str::contains(task_short_id));
 
     base_command(&transcript, &db_path)?
         .arg("tree")
@@ -135,6 +137,54 @@ fn set_status_与_promote_会更新_tree_和_inspect() -> Result<()> {
         .success()
         .stdout(predicate::str::contains("derived_from"))
         .stdout(predicate::str::contains("补充 ingest fixture"));
+
+    Ok(())
+}
+
+#[test]
+fn 自动发现_transcript_会跳过坏_session_并使用最新有效文件() -> Result<()> {
+    let home = tempdir()?;
+    let repo_root = home.path().join("demo-repo");
+    let session_dir = home.path().join(".codex").join("sessions").join("demo");
+    fs::create_dir_all(repo_root.join(".git"))?;
+    fs::create_dir_all(&session_dir)?;
+    fs::create_dir_all(home.path().join(".local").join("share"))?;
+
+    let root_string = fs::canonicalize(&repo_root)?.to_string_lossy().to_string();
+    fs::write(session_dir.join("broken.jsonl"), "not-json\n")?;
+    fs::write(
+        session_dir.join("stale.jsonl"),
+        format!(
+            "{{\"timestamp\":\"2026-04-14T04:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"stale\",\"cwd\":\"{root_string}\"}}}}\n\
+             {{\"timestamp\":\"2026-04-14T04:00:01.000Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"任务：旧任务\",\"images\":[],\"local_images\":[],\"text_elements\":[]}}}}\n"
+        ),
+    )?;
+    fs::write(
+        session_dir.join("latest.jsonl"),
+        format!(
+            "{{\"timestamp\":\"2026-04-14T05:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"latest\",\"cwd\":\"{root_string}\"}}}}\n\
+             {{\"timestamp\":\"2026-04-14T05:00:01.000Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"任务：新任务\\n分支：新分支\\n状态：branch:新分支 -> ready\",\"images\":[],\"local_images\":[],\"text_elements\":[]}}}}\n"
+        ),
+    )?;
+
+    let now = std::time::SystemTime::now();
+    let stale_time = filetime::FileTime::from_system_time(now - std::time::Duration::from_secs(60));
+    let latest_time = filetime::FileTime::from_system_time(now);
+    filetime::set_file_mtime(session_dir.join("stale.jsonl"), stale_time)?;
+    filetime::set_file_mtime(session_dir.join("latest.jsonl"), latest_time)?;
+
+    let mut command = Command::cargo_bin("aidoit")?;
+    command
+        .current_dir(&repo_root)
+        .env("HOME", home.path())
+        .env("XDG_DATA_HOME", home.path().join(".local").join("share"))
+        .arg("status");
+    command
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("新任务"))
+        .stdout(predicate::str::contains("新分支"))
+        .stdout(predicate::str::contains("旧任务").not());
 
     Ok(())
 }

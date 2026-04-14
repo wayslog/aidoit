@@ -40,13 +40,19 @@ fn codex_transcript_能抽取最小对象集() -> Result<()> {
     assert_eq!(phases.len(), 1);
     assert_eq!(relations.len(), 4);
 
-    assert_eq!(branches[0].state, NodeState::Work(WorkState::Parked));
-    assert_eq!(branches[1].state, NodeState::Work(WorkState::Ready));
-    assert_eq!(branches[2].state, NodeState::Work(WorkState::Parked));
-    assert_eq!(
-        principles[0].state,
-        NodeState::Review(ReviewState::Proposed)
-    );
+    assert!(branches.iter().any(|node| {
+        node.title == "实现 CLI 视图" && node.state == NodeState::Work(WorkState::Parked)
+    }));
+    assert!(branches.iter().any(|node| {
+        node.title == "实现 raw_events" && node.state == NodeState::Work(WorkState::Ready)
+    }));
+    assert!(branches.iter().any(|node| {
+        node.title == "补充 ingest fixture" && node.state == NodeState::Work(WorkState::Parked)
+    }));
+    assert!(principles.iter().any(|node| {
+        node.title == "transcript 是权威源"
+            && node.state == NodeState::Review(ReviewState::Proposed)
+    }));
 
     Ok(())
 }
@@ -138,6 +144,32 @@ fn 损坏的_transcript_会返回行号错误() -> Result<()> {
     let error = import_codex_transcript(&mut store, "/repo/demo", &transcript).unwrap_err();
 
     assert!(format!("{error:#}").contains("第 2 行"));
+
+    Ok(())
+}
+
+#[test]
+fn 节点标题里的冒号会被完整保留() -> Result<()> {
+    let temp = tempdir()?;
+    let transcript = temp.path().join("colon.jsonl");
+    fs::write(
+        &transcript,
+        concat!(
+            "{\"timestamp\":\"2026-04-14T04:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"session-1\",\"cwd\":\"/repo/demo\"}}\n",
+            "{\"timestamp\":\"2026-04-14T04:00:01.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"任务：TODO: 修 bug\",\"images\":[],\"local_images\":[],\"text_elements\":[]}}\n"
+        ),
+    )?;
+
+    let mut store = Store::open_in_memory()?;
+    store.initialize()?;
+
+    import_codex_transcript(&mut store, "/repo/demo", &transcript)?;
+    let tasks = store.list_nodes_by_kind(NodeKind::Task)?;
+
+    assert!(
+        tasks.iter().any(|node| node.title == "TODO: 修 bug"),
+        "任务标题中的冒号应该被完整保留"
+    );
 
     Ok(())
 }

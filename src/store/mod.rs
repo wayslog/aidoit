@@ -24,11 +24,13 @@ pub struct Store {
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
+        initialize_connection(&conn)?;
         Ok(Self { conn })
     }
 
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
+        initialize_connection(&conn)?;
         Ok(Self { conn })
     }
 
@@ -43,6 +45,13 @@ impl Store {
             |row| row.get::<_, i64>(0),
         )?;
         Ok(exists == 1)
+    }
+
+    pub fn foreign_keys_enabled(&self) -> Result<bool> {
+        let enabled = self
+            .conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))?;
+        Ok(enabled == 1)
     }
 
     pub fn ingest_batch(
@@ -62,9 +71,9 @@ impl Store {
         }
 
         pending_projection.sort_by(|left, right| {
-            event_priority(left)
-                .cmp(&event_priority(right))
-                .then(left.source_line_no.cmp(&right.source_line_no))
+            left.source_line_no
+                .cmp(&right.source_line_no)
+                .then(event_priority(left).cmp(&event_priority(right)))
                 .then(left.event_id.cmp(&right.event_id))
         });
         for event in pending_projection {
@@ -122,4 +131,9 @@ fn event_priority(event: &StoredEvent) -> u8 {
         RawEventPayload::StateChanged { .. } => 1,
         RawEventPayload::RelationCaptured { .. } => 2,
     }
+}
+
+fn initialize_connection(conn: &Connection) -> Result<()> {
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
+    Ok(())
 }

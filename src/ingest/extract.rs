@@ -350,6 +350,8 @@ fn parse_state(kind: NodeKind, text: &str) -> Result<NodeState> {
     }
 }
 
+// 事件 ID 使用 80-bit 截断摘要，面对单仓库下几千到几万条事件时碰撞概率仍然极低，
+// 但长度更短，便于日志、SQLite 和 CLI 输出使用。如果后续事件量级显著放大，可以再提高截断长度。
 fn stable_event_id(transcript_path: &str, line_no: u64, index: usize, seed: &str) -> String {
     let digest = digest_hex(&format!("{transcript_path}:{line_no}:{index}:{seed}"));
     format!("evt-{}", &digest[..20])

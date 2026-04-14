@@ -105,8 +105,12 @@ pub fn run() -> Result<()> {
         }
         Commands::Promote { id, title } => {
             let node = resolve_node(&store, &id)?;
-            promote_branch(&mut store, &context, &node, title.as_deref())?;
-            format!("已提升为任务：{} ({})", node.title, short_id(&node.id))
+            let promoted = promote_branch(&mut store, &context, &node, title.as_deref())?;
+            format!(
+                "已提升为任务：{} ({})",
+                promoted.title,
+                short_id(&promoted.id)
+            )
         }
     };
 
@@ -429,7 +433,7 @@ fn promote_branch(
     context: &AppContext,
     branch: &NodeView,
     title: Option<&str>,
-) -> Result<()> {
+) -> Result<NodeView> {
     if branch.kind != NodeKind::Branch {
         bail!("只有 Branch 可以提升为任务");
     }
@@ -461,7 +465,7 @@ fn promote_branch(
                 id: task_id.clone(),
                 kind: NodeKind::Task,
                 title: task_title.to_string(),
-                state: task_state,
+                state: task_state.clone(),
                 summary: Some("由分支提升生成".to_string()),
                 source_event_id: node_event_id,
             },
@@ -478,13 +482,21 @@ fn promote_branch(
         ),
         RawEventKind::RelationCaptured,
         RawEventPayload::RelationCaptured {
-            source_id: task_id,
+            source_id: task_id.clone(),
             target_id: branch.id.clone(),
             relation: RelationKind::DerivedFrom,
         },
     );
 
-    apply_manual_events(store, context, &[node_event, relation_event])
+    apply_manual_events(store, context, &[node_event, relation_event])?;
+
+    Ok(NodeView {
+        id: task_id,
+        kind: NodeKind::Task,
+        title: task_title.to_string(),
+        state: task_state,
+        summary: Some("由分支提升生成".to_string()),
+    })
 }
 
 fn apply_manual_events(

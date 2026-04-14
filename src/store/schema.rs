@@ -4,8 +4,6 @@ use rusqlite::Connection;
 pub fn initialize(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
-        PRAGMA foreign_keys = ON;
-
         CREATE TABLE IF NOT EXISTS ingest_checkpoints (
             repo_root TEXT NOT NULL,
             transcript_path TEXT NOT NULL,
@@ -52,7 +50,9 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             kind TEXT NOT NULL,
             source_event_id TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            PRIMARY KEY (repo_root, source_id, target_id, kind)
+            PRIMARY KEY (repo_root, source_id, target_id, kind),
+            FOREIGN KEY (source_id) REFERENCES nodes(id),
+            FOREIGN KEY (target_id) REFERENCES nodes(id)
         );
         ",
     )?;

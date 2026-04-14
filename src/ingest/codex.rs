@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use directories::BaseDirs;
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,8 +101,10 @@ pub fn read_new_messages(path: &Path, last_line_no: u64) -> Result<ParsedTranscr
 }
 
 pub fn find_latest_transcript_for_repo(repo_root: &Path) -> Result<Option<PathBuf>> {
-    let home = std::env::var("HOME").context("缺少 HOME 环境变量")?;
-    let sessions_root = Path::new(&home).join(".codex").join("sessions");
+    let home = BaseDirs::new()
+        .map(|dirs| dirs.home_dir().to_path_buf())
+        .context("无法确定 home 目录")?;
+    let sessions_root = home.join(".codex").join("sessions");
     if !sessions_root.exists() {
         return Ok(None);
     }
@@ -122,13 +125,20 @@ pub fn find_latest_transcript_for_repo(repo_root: &Path) -> Result<Option<PathBu
             if entry_path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
                 continue;
             }
-            let file = fs::File::open(&entry_path)?;
+            let Ok(file) = fs::File::open(&entry_path) else {
+                continue;
+            };
             let mut reader = BufReader::new(file);
             let mut first_line = String::new();
-            if reader.read_line(&mut first_line)? == 0 {
+            let Ok(read_bytes) = reader.read_line(&mut first_line) else {
+                continue;
+            };
+            if read_bytes == 0 {
                 continue;
             }
-            let value: Value = serde_json::from_str(&first_line)?;
+            let Ok(value) = serde_json::from_str::<Value>(&first_line) else {
+                continue;
+            };
             let cwd = value
                 .get("payload")
                 .and_then(|payload| payload.get("cwd"))
@@ -136,7 +146,12 @@ pub fn find_latest_transcript_for_repo(repo_root: &Path) -> Result<Option<PathBu
             if !cwd_matches_repo_root(cwd, &normalized_repo_root) {
                 continue;
             }
-            let modified_at = entry.metadata()?.modified()?;
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            let Ok(modified_at) = metadata.modified() else {
+                continue;
+            };
             candidates.push((modified_at, entry_path));
         }
     }
