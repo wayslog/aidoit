@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0.1] - 2026-04-15
+
+### Fixed
+- 修复 GitHub Release 工作流里的 Intel macOS runner 标签，避免打 tag 后因 `macos-13` 配置不受支持而中断发布。
+
 ## [0.2.0.0] - 2026-04-15
 
 ### Added
