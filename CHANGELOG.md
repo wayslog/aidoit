@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0.0] - 2026-04-15
+
+### Added
+- 新增 execution-unit 原生模型，基于 `git common dir` 把主工作目录和 linked worktree 识别为同一 project 下的多个执行单元，并把节点/关系/事件作用域拆分为 project 级与 unit 级。
+- 新增 `aidoit units`，直接展示当前 project 的 execution unit 摘要，包括 unit 类型、路径、branch、head、当前/激活标记和工作项统计。
+- 新增 `aidoit global agenda --lens <urgent|easy|mainline|low-switch>`，基于同一份 `unit_summaries` 输出带排序依据说明的全局推荐列表。
+- 新增 execution-unit 回归测试，覆盖主仓库 + linked worktree 识别、lens 排序差异、stale/duplicate worktree、旧 schema fail-fast 和 active 同步语义。
+
+### Changed
+- transcript 自动发现不再只按单仓库匹配，而是按 project 维度在 `~/.codex/sessions/` 中寻找最近 transcript，并按 transcript 自己所属的 execution unit 导入。
+- `status`、`tree`、`agenda`、`principles`、`inspect`、`set-status`、`confirm`、`reject`、`promote` 继续可用，但语义已切到“当前 unit + project 级共享原则/协定”。
+- 本地数据库路径改为 project 级共享，同一 project 下的多个 worktree 复用同一份 SQLite 数据。
+
+### Fixed
+- 默认 transcript 发现现在会跳过损坏 session 和 `cwd` 指向失效 worktree 的 stale session，不再把 CLI 默认入口直接打爆。
+- `global agenda` 推荐项现在会显示可定位的 unit 路径，不再只有无法区分的 `linked_worktree` 标签。
+- `easy` lens 的理由文案不再把未 ready 的主线 task 说成 ready。
+
 ## [0.1.0.0] - 2026-04-14
 
 ### Added
