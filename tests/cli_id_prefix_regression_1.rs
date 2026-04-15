@@ -5,7 +5,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::tempdir;
 
-use aidoit::domain::{NodeKind, stable_node_id};
+use aidoit::domain::{ExecutionUnit, NodeKind, stable_node_id_for_unit};
 
 // Regression: ISSUE-001 — 列表视图不暴露节点 ID，导致 inspect / set-status / confirm / promote 无法从用户可见输出里继续操作
 // Found by /qa on 2026-04-14
@@ -39,14 +39,18 @@ fn short_id(id: &str) -> String {
     id[..id.len().min(SHORT_ID_LEN)].to_string()
 }
 
+fn legacy_node_id(kind: NodeKind, title: &str) -> String {
+    stable_node_id_for_unit(&ExecutionUnit::legacy_main(REPO_ROOT), kind, title)
+}
+
 #[test]
 fn 列表视图会暴露短_id_且变更命令接受前缀() -> Result<()> {
     let (_temp, transcript, db_path) = prepare_paths()?;
-    let main_task_id = stable_node_id(REPO_ROOT, NodeKind::Task, "完成 transcript 闭环");
-    let ready_branch_id = stable_node_id(REPO_ROOT, NodeKind::Branch, "实现 raw_events");
-    let parked_branch_id = stable_node_id(REPO_ROOT, NodeKind::Branch, "补充 ingest fixture");
-    let promoted_task_id = stable_node_id(REPO_ROOT, NodeKind::Task, "补充 ingest fixture");
-    let principle_id = stable_node_id(REPO_ROOT, NodeKind::Principle, "transcript 是权威源");
+    let main_task_id = legacy_node_id(NodeKind::Task, "完成 transcript 闭环");
+    let ready_branch_id = legacy_node_id(NodeKind::Branch, "实现 raw_events");
+    let parked_branch_id = legacy_node_id(NodeKind::Branch, "补充 ingest fixture");
+    let promoted_task_id = legacy_node_id(NodeKind::Task, "补充 ingest fixture");
+    let principle_id = legacy_node_id(NodeKind::Principle, "transcript 是权威源");
 
     base_command(&transcript, &db_path)?
         .arg("status")

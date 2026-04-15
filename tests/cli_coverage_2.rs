@@ -5,7 +5,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::tempdir;
 
-use aidoit::domain::{NodeKind, stable_node_id};
+use aidoit::domain::{ExecutionUnit, NodeKind, stable_node_id_for_unit};
 
 const FIXTURE: &str = "tests/fixtures/codex_session.jsonl";
 const REPO_ROOT: &str = "/repo/demo";
@@ -30,10 +30,14 @@ fn base_command(transcript: &PathBuf, db_path: &PathBuf) -> Result<Command> {
     Ok(command)
 }
 
+fn legacy_node_id(kind: NodeKind, title: &str) -> String {
+    stable_node_id_for_unit(&ExecutionUnit::legacy_main(REPO_ROOT), kind, title)
+}
+
 #[test]
 fn reject_会把原则从_proposed_切到_rejected() -> Result<()> {
     let (_temp, transcript, db_path) = prepare_paths()?;
-    let principle_id = stable_node_id(REPO_ROOT, NodeKind::Principle, "transcript 是权威源");
+    let principle_id = legacy_node_id(NodeKind::Principle, "transcript 是权威源");
 
     base_command(&transcript, &db_path)?
         .arg("reject")
@@ -65,7 +69,7 @@ fn reject_会把原则从_proposed_切到_rejected() -> Result<()> {
 #[test]
 fn cli_会拒绝非法状态迁移() -> Result<()> {
     let (_temp, transcript, db_path) = prepare_paths()?;
-    let branch_id = stable_node_id(REPO_ROOT, NodeKind::Branch, "实现 raw_events");
+    let branch_id = legacy_node_id(NodeKind::Branch, "实现 raw_events");
 
     base_command(&transcript, &db_path)?
         .arg("set-status")

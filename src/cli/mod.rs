@@ -240,15 +240,17 @@ fn resolve_import_execution_unit(
             let is_active = execution_unit.unit_id == context.execution_unit.unit_id;
             Ok(execution_unit.with_active(is_active))
         }
-        Ok(None) if context.execution_unit.project_id == context.execution_unit.project_root => {
+        Ok(None) if is_legacy_project(&context.execution_unit) => {
             Ok(context.execution_unit.clone())
         }
         Ok(None) => bail!("无法从 transcript 解析 execution unit，请检查 transcript 的 cwd 元数据"),
-        Err(_) if context.execution_unit.project_id == context.execution_unit.project_root => {
-            Ok(context.execution_unit.clone())
-        }
+        Err(_) if is_legacy_project(&context.execution_unit) => Ok(context.execution_unit.clone()),
         Err(error) => Err(error).context("无法从 transcript 解析 execution unit"),
     }
+}
+
+fn is_legacy_project(execution_unit: &ExecutionUnit) -> bool {
+    execution_unit.project_id == execution_unit.project_root
 }
 
 fn default_sessions_root() -> Result<PathBuf> {
