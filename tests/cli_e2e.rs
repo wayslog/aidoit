@@ -7,7 +7,7 @@ use serde_json::json;
 use tempfile::tempdir;
 
 use aidoit::domain::{
-    NodeKind, NodeState, ReviewState, discover_execution_unit, stable_node_id,
+    ExecutionUnit, NodeKind, NodeState, ReviewState, discover_execution_unit,
     stable_node_id_for_unit,
 };
 use aidoit::ingest::import_codex_transcript_for_unit;
@@ -34,6 +34,10 @@ fn base_command(transcript: &PathBuf, db_path: &PathBuf) -> Result<Command> {
         .arg("--db-path")
         .arg(db_path);
     Ok(command)
+}
+
+fn legacy_node_id(kind: NodeKind, title: &str) -> String {
+    stable_node_id_for_unit(&ExecutionUnit::legacy_main(REPO_ROOT), kind, title)
 }
 
 #[test]
@@ -74,7 +78,7 @@ fn agenda_只显示_ready_项() -> Result<()> {
 #[test]
 fn principles_只展示已确认项() -> Result<()> {
     let (_temp, transcript, db_path) = prepare_paths()?;
-    let principle_id = stable_node_id(REPO_ROOT, NodeKind::Principle, "transcript 是权威源");
+    let principle_id = legacy_node_id(NodeKind::Principle, "transcript 是权威源");
 
     base_command(&transcript, &db_path)?
         .arg("principles")
@@ -102,8 +106,8 @@ fn principles_只展示已确认项() -> Result<()> {
 #[test]
 fn set_status_与_promote_会更新_tree_和_inspect() -> Result<()> {
     let (_temp, transcript, db_path) = prepare_paths()?;
-    let branch_id = stable_node_id(REPO_ROOT, NodeKind::Branch, "补充 ingest fixture");
-    let task_id = stable_node_id(REPO_ROOT, NodeKind::Task, "补充 ingest fixture");
+    let branch_id = legacy_node_id(NodeKind::Branch, "补充 ingest fixture");
+    let task_id = legacy_node_id(NodeKind::Task, "补充 ingest fixture");
     let task_short_id = &task_id[..12];
 
     base_command(&transcript, &db_path)?
