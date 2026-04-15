@@ -8,6 +8,8 @@ use anyhow::{Context, Result};
 use directories::BaseDirs;
 use serde_json::Value;
 
+use crate::domain::{ExecutionUnit, discover_execution_unit, resolve_execution_unit};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptMessage {
     pub line_no: u64,
@@ -20,6 +22,12 @@ pub struct ParsedTranscript {
     pub session_id: String,
     pub messages: Vec<TranscriptMessage>,
     pub total_lines: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredTranscript {
+    pub path: PathBuf,
+    pub execution_unit: ExecutionUnit,
 }
 
 pub fn read_new_messages(path: &Path, last_line_no: u64) -> Result<ParsedTranscript> {
@@ -105,13 +113,33 @@ pub fn find_latest_transcript_for_repo(repo_root: &Path) -> Result<Option<PathBu
         .map(|dirs| dirs.home_dir().to_path_buf())
         .context("无法确定 home 目录")?;
     let sessions_root = home.join(".codex").join("sessions");
+    let execution_unit = resolve_execution_unit(repo_root)?
+        .unwrap_or_else(|| ExecutionUnit::legacy_main(repo_root.to_string_lossy().to_string()));
+    Ok(
+        find_latest_transcript_for_project_with_unit_in(&execution_unit, &sessions_root)?
+            .map(|discovered| discovered.path),
+    )
+}
+
+pub fn find_latest_transcript_for_project_in(
+    current_unit: &ExecutionUnit,
+    sessions_root: &Path,
+) -> Result<Option<PathBuf>> {
+    Ok(
+        find_latest_transcript_for_project_with_unit_in(current_unit, sessions_root)?
+            .map(|discovered| discovered.path),
+    )
+}
+
+pub fn find_latest_transcript_for_project_with_unit_in(
+    current_unit: &ExecutionUnit,
+    sessions_root: &Path,
+) -> Result<Option<DiscoveredTranscript>> {
     if !sessions_root.exists() {
         return Ok(None);
     }
-    let normalized_repo_root =
-        fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
 
-    let mut stack = vec![sessions_root];
+    let mut stack = vec![sessions_root.to_path_buf()];
     let mut candidates = Vec::new();
 
     while let Some(path) = stack.pop() {
@@ -139,11 +167,11 @@ pub fn find_latest_transcript_for_repo(repo_root: &Path) -> Result<Option<PathBu
             let Ok(value) = serde_json::from_str::<Value>(&first_line) else {
                 continue;
             };
-            let cwd = value
-                .get("payload")
-                .and_then(|payload| payload.get("cwd"))
-                .and_then(Value::as_str);
-            if !cwd_matches_repo_root(cwd, &normalized_repo_root) {
+            let candidate_unit = match transcript_execution_unit_from_value(&value) {
+                Ok(Some(candidate_unit)) => candidate_unit,
+                Ok(None) | Err(_) => continue,
+            };
+            if candidate_unit.project_id != current_unit.project_id {
                 continue;
             }
             let Ok(metadata) = entry.metadata() else {
@@ -152,19 +180,38 @@ pub fn find_latest_transcript_for_repo(repo_root: &Path) -> Result<Option<PathBu
             let Ok(modified_at) = metadata.modified() else {
                 continue;
             };
-            candidates.push((modified_at, entry_path));
+            candidates.push((
+                modified_at,
+                DiscoveredTranscript {
+                    path: entry_path,
+                    execution_unit: candidate_unit,
+                },
+            ));
         }
     }
 
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(candidates.pop().map(|(_, path)| path))
+    Ok(candidates.pop().map(|(_, discovered)| discovered))
 }
 
-fn cwd_matches_repo_root(cwd: Option<&str>, repo_root: &Path) -> bool {
+pub fn resolve_transcript_execution_unit(path: &Path) -> Result<Option<ExecutionUnit>> {
+    let file = fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut first_line = String::new();
+    if reader.read_line(&mut first_line)? == 0 {
+        return Ok(None);
+    }
+    let value: Value = serde_json::from_str(&first_line)?;
+    transcript_execution_unit_from_value(&value)
+}
+
+fn transcript_execution_unit_from_value(value: &Value) -> Result<Option<ExecutionUnit>> {
+    let cwd = value
+        .get("payload")
+        .and_then(|payload| payload.get("cwd"))
+        .and_then(Value::as_str);
     let Some(cwd) = cwd else {
-        return false;
+        return Ok(None);
     };
-    let cwd_path = Path::new(cwd);
-    let normalized_cwd = fs::canonicalize(cwd_path).unwrap_or_else(|_| cwd_path.to_path_buf());
-    normalized_cwd == repo_root
+    Ok(Some(discover_execution_unit(cwd)?))
 }

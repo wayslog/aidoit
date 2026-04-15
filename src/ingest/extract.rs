@@ -2,12 +2,13 @@ use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
 
 use crate::domain::{
-    NodeKind, NodeRecord, NodeState, PhaseState, RawEventKind, RawEventPayload, RelationKind,
-    ReviewState, StoredEvent, StoredEventMeta, WorkState, kind_name, stable_node_id,
+    ExecutionUnit, NodeKind, NodeRecord, NodeState, PhaseState, RawEventKind, RawEventPayload,
+    RelationKind, ReviewState, StoredEvent, StoredEventMeta, WorkState, kind_name,
+    stable_node_id_for_unit,
 };
 
 struct ExtractionContext<'a> {
-    repo_root: &'a str,
+    execution_unit: &'a ExecutionUnit,
     transcript_path: &'a str,
     session_id: &'a str,
     line_no: u64,
@@ -15,7 +16,7 @@ struct ExtractionContext<'a> {
 }
 
 pub fn extract_message_events(
-    repo_root: &str,
+    execution_unit: &ExecutionUnit,
     transcript_path: &str,
     session_id: &str,
     line_no: u64,
@@ -23,7 +24,7 @@ pub fn extract_message_events(
     message: &str,
 ) -> Result<Vec<StoredEvent>> {
     let context = ExtractionContext {
-        repo_root,
+        execution_unit,
         transcript_path,
         session_id,
         line_no,
@@ -147,7 +148,7 @@ fn node_capture_event(
     title: &str,
     state: NodeState,
 ) -> Result<StoredEvent> {
-    let node_id = stable_node_id(context.repo_root, kind, title);
+    let node_id = stable_node_id_for_unit(context.execution_unit, kind, title);
     let event_id = stable_event_id(
         context.transcript_path,
         context.line_no,
@@ -164,9 +165,9 @@ fn node_capture_event(
     };
 
     Ok(StoredEvent::from_meta(
-        StoredEventMeta::new(
+        StoredEventMeta::for_execution_unit(
             event_id,
-            context.repo_root,
+            context.execution_unit,
             context.transcript_path,
             context.line_no,
             context.session_id,
@@ -183,13 +184,13 @@ fn relation_event(
     relation_spec: RelationSpec<'_>,
     relation: RelationKind,
 ) -> Result<StoredEvent> {
-    let source_id = stable_node_id(
-        context.repo_root,
+    let source_id = stable_node_id_for_unit(
+        context.execution_unit,
         relation_spec.source_kind,
         relation_spec.source_title,
     );
-    let target_id = stable_node_id(
-        context.repo_root,
+    let target_id = stable_node_id_for_unit(
+        context.execution_unit,
         relation_spec.target_kind,
         relation_spec.target_title,
     );
@@ -207,9 +208,9 @@ fn relation_event(
     );
 
     Ok(StoredEvent::from_meta(
-        StoredEventMeta::new(
+        StoredEventMeta::for_execution_unit(
             event_id,
-            context.repo_root,
+            context.execution_unit,
             context.transcript_path,
             context.line_no,
             context.session_id,
@@ -231,7 +232,7 @@ fn state_change_event(
     title: &str,
     state: NodeState,
 ) -> Result<StoredEvent> {
-    let node_id = stable_node_id(context.repo_root, kind, title);
+    let node_id = stable_node_id_for_unit(context.execution_unit, kind, title);
     let event_id = stable_event_id(
         context.transcript_path,
         context.line_no,
@@ -240,9 +241,9 @@ fn state_change_event(
     );
 
     Ok(StoredEvent::from_meta(
-        StoredEventMeta::new(
+        StoredEventMeta::for_execution_unit(
             event_id,
-            context.repo_root,
+            context.execution_unit,
             context.transcript_path,
             context.line_no,
             context.session_id,

@@ -1,9 +1,9 @@
 use anyhow::{Result, anyhow, bail};
-use rusqlite::{Connection, OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::domain::{
-    NodeKind, NodeState, RawEventPayload, RelationKind, ReviewState, StoredEvent, WorkState,
-    validate_review_state_transition, validate_work_state_transition,
+    NodeKind, NodeScope, NodeState, RawEventPayload, RelationKind, ReviewState, StoredEvent,
+    WorkState, node_scope, validate_review_state_transition, validate_work_state_transition,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,10 +27,15 @@ pub fn apply_event(tx: &Transaction<'_>, event: &StoredEvent) -> Result<()> {
         RawEventPayload::NodeCaptured { node } => {
             validate_state_matches_kind(node.kind, &node.state)?;
             let (state_group, state_value) = split_state(&node.state);
+            let (scope, scope_id, unit_id) = node_scope_columns(event, node.kind);
             tx.execute(
                 "
                 INSERT INTO nodes (
                     id,
+                    project_id,
+                    scope,
+                    scope_id,
+                    unit_id,
                     repo_root,
                     kind,
                     title,
@@ -41,8 +46,12 @@ pub fn apply_event(tx: &Transaction<'_>, event: &StoredEvent) -> Result<()> {
                     last_event_id,
                     created_at,
                     updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
                 ON CONFLICT(id) DO UPDATE SET
+                    project_id = excluded.project_id,
+                    scope = excluded.scope,
+                    scope_id = excluded.scope_id,
+                    unit_id = excluded.unit_id,
                     repo_root = excluded.repo_root,
                     kind = excluded.kind,
                     title = excluded.title,
@@ -52,6 +61,10 @@ pub fn apply_event(tx: &Transaction<'_>, event: &StoredEvent) -> Result<()> {
                 ",
                 (
                     &node.id,
+                    &event.project_id,
+                    scope,
+                    scope_id,
+                    unit_id,
                     &event.repo_root,
                     kind_to_str(node.kind),
                     &node.title,
@@ -70,21 +83,36 @@ pub fn apply_event(tx: &Transaction<'_>, event: &StoredEvent) -> Result<()> {
             target_id,
             relation,
         } => {
-            if !node_exists(tx, source_id)? || !node_exists(tx, target_id)? {
-                bail!("关系两端节点必须先存在");
+            let source_scope =
+                load_node_scope(tx, source_id)?.ok_or_else(|| anyhow!("关系源节点必须先存在"))?;
+            let target_scope =
+                load_node_scope(tx, target_id)?.ok_or_else(|| anyhow!("关系目标节点必须先存在"))?;
+            if source_scope.project_id != target_scope.project_id
+                || source_scope.scope != target_scope.scope
+                || source_scope.scope_id != target_scope.scope_id
+            {
+                bail!("关系两端节点必须处于同一作用域");
             }
             tx.execute(
                 "
                 INSERT OR IGNORE INTO relations (
+                    project_id,
+                    scope,
+                    scope_id,
+                    unit_id,
                     repo_root,
                     source_id,
                     target_id,
                     kind,
                     source_event_id,
                     created_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                 ",
                 (
+                    &source_scope.project_id,
+                    &source_scope.scope,
+                    &source_scope.scope_id,
+                    &source_scope.unit_id,
                     &event.repo_root,
                     source_id,
                     target_id,
@@ -133,72 +161,62 @@ pub fn count_nodes(conn: &Connection) -> Result<usize> {
 }
 
 pub fn list_nodes(conn: &Connection) -> Result<Vec<NodeView>> {
-    let mut stmt = conn.prepare(
+    query_nodes(
+        conn,
         "
         SELECT id, kind, title, state_group, state_value, summary
         FROM nodes
         ORDER BY kind, title
         ",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, Option<String>>(5)?,
-        ))
-    })?;
-
-    let mut nodes = Vec::new();
-    for row in rows {
-        let (id, kind, title, state_group, state_value, summary) = row?;
-        nodes.push(NodeView {
-            id,
-            kind: parse_kind(kind.as_str())?,
-            title,
-            state: join_state(&state_group, &state_value)?,
-            summary,
-        });
-    }
-
-    Ok(nodes)
+        [],
+    )
 }
 
 pub fn list_nodes_by_kind(conn: &Connection, kind: NodeKind) -> Result<Vec<NodeView>> {
-    let mut stmt = conn.prepare(
+    query_nodes(
+        conn,
         "
         SELECT id, kind, title, state_group, state_value, summary
         FROM nodes
         WHERE kind = ?1
         ORDER BY title
         ",
-    )?;
-    let rows = stmt.query_map([kind_to_str(kind)], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, Option<String>>(5)?,
-        ))
-    })?;
+        [kind_to_str(kind)],
+    )
+}
 
-    let mut nodes = Vec::new();
-    for row in rows {
-        let (id, kind, title, state_group, state_value, summary) = row?;
-        nodes.push(NodeView {
-            id,
-            kind: parse_kind(kind.as_str())?,
-            title,
-            state: join_state(&state_group, &state_value)?,
-            summary,
-        });
-    }
+pub fn list_nodes_for_unit(
+    conn: &Connection,
+    project_id: &str,
+    unit_id: &str,
+) -> Result<Vec<NodeView>> {
+    query_nodes(
+        conn,
+        "
+        SELECT id, kind, title, state_group, state_value, summary
+        FROM nodes
+        WHERE project_id = ?1
+          AND scope = 'execution_unit'
+          AND scope_id = ?2
+        ORDER BY kind, title
+        ",
+        params![project_id, unit_id],
+    )
+}
 
-    Ok(nodes)
+pub fn list_project_principles(conn: &Connection, project_id: &str) -> Result<Vec<NodeView>> {
+    query_nodes(
+        conn,
+        "
+        SELECT id, kind, title, state_group, state_value, summary
+        FROM nodes
+        WHERE project_id = ?1
+          AND scope = 'project'
+          AND kind IN ('principle', 'agreement')
+        ORDER BY kind, title
+        ",
+        [project_id],
+    )
 }
 
 pub fn get_node(conn: &Connection, node_id: &str) -> Result<Option<NodeView>> {
@@ -237,14 +255,73 @@ pub fn get_node(conn: &Connection, node_id: &str) -> Result<Option<NodeView>> {
 }
 
 pub fn list_relations(conn: &Connection) -> Result<Vec<RelationView>> {
-    let mut stmt = conn.prepare(
+    query_relations(
+        conn,
         "
         SELECT source_id, target_id, kind
         FROM relations
         ORDER BY source_id, target_id, kind
         ",
-    )?;
-    let rows = stmt.query_map([], |row| {
+        [],
+    )
+}
+
+pub fn list_relations_for_unit(
+    conn: &Connection,
+    project_id: &str,
+    unit_id: &str,
+) -> Result<Vec<RelationView>> {
+    query_relations(
+        conn,
+        "
+        SELECT source_id, target_id, kind
+        FROM relations
+        WHERE project_id = ?1
+          AND scope = 'execution_unit'
+          AND scope_id = ?2
+        ORDER BY source_id, target_id, kind
+        ",
+        params![project_id, unit_id],
+    )
+}
+
+fn query_nodes<P>(conn: &Connection, sql: &str, params: P) -> Result<Vec<NodeView>>
+where
+    P: rusqlite::Params,
+{
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params, |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
+        ))
+    })?;
+
+    let mut nodes = Vec::new();
+    for row in rows {
+        let (id, kind, title, state_group, state_value, summary) = row?;
+        nodes.push(NodeView {
+            id,
+            kind: parse_kind(kind.as_str())?,
+            title,
+            state: join_state(&state_group, &state_value)?,
+            summary,
+        });
+    }
+
+    Ok(nodes)
+}
+
+fn query_relations<P>(conn: &Connection, sql: &str, params: P) -> Result<Vec<RelationView>>
+where
+    P: rusqlite::Params,
+{
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params, |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -265,13 +342,78 @@ pub fn list_relations(conn: &Connection) -> Result<Vec<RelationView>> {
     Ok(relations)
 }
 
-fn node_exists(tx: &Transaction<'_>, node_id: &str) -> Result<bool> {
-    let exists = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM nodes WHERE id = ?1)",
-        [node_id],
-        |row| row.get::<_, i64>(0),
-    )?;
-    Ok(exists == 1)
+fn load_node_state(tx: &Transaction<'_>, node_id: &str) -> Result<Option<StoredNodeState>> {
+    let raw = tx
+        .query_row(
+            "
+            SELECT kind, state_group, state_value
+            FROM nodes
+            WHERE id = ?1
+            ",
+            [node_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let Some((kind, state_group, state_value)) = raw else {
+        return Ok(None);
+    };
+
+    Ok(Some(StoredNodeState {
+        kind: parse_kind(kind.as_str())?,
+        state: join_state(&state_group, &state_value)?,
+    }))
+}
+
+fn load_node_scope(tx: &Transaction<'_>, node_id: &str) -> Result<Option<StoredNodeScope>> {
+    let raw = tx
+        .query_row(
+            "
+            SELECT project_id, scope, scope_id, unit_id
+            FROM nodes
+            WHERE id = ?1
+            ",
+            [node_id],
+            |row| {
+                Ok(StoredNodeScope {
+                    project_id: row.get(0)?,
+                    scope: row.get(1)?,
+                    scope_id: row.get(2)?,
+                    unit_id: row.get(3)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(raw)
+}
+
+struct StoredNodeState {
+    kind: NodeKind,
+    state: NodeState,
+}
+
+struct StoredNodeScope {
+    project_id: String,
+    scope: String,
+    scope_id: String,
+    unit_id: Option<String>,
+}
+
+fn node_scope_columns(event: &StoredEvent, kind: NodeKind) -> (&'static str, &str, Option<&str>) {
+    match node_scope(kind) {
+        NodeScope::Project => ("project", event.project_id.as_str(), None),
+        NodeScope::ExecutionUnit => (
+            "execution_unit",
+            event.unit_id.as_str(),
+            Some(event.unit_id.as_str()),
+        ),
+    }
 }
 
 fn validate_state_matches_kind(kind: NodeKind, state: &NodeState) -> Result<()> {
@@ -305,40 +447,6 @@ fn validate_state_change(kind: NodeKind, from: &NodeState, to: &NodeState) -> Re
         (NodeState::Phase(_), NodeState::Phase(_)) => Ok(()),
         _ => bail!("状态类型不一致"),
     }
-}
-
-fn load_node_state(tx: &Transaction<'_>, node_id: &str) -> Result<Option<StoredNodeState>> {
-    let raw = tx
-        .query_row(
-            "
-            SELECT kind, state_group, state_value
-            FROM nodes
-            WHERE id = ?1
-            ",
-            [node_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )
-        .optional()?;
-
-    let Some((kind, state_group, state_value)) = raw else {
-        return Ok(None);
-    };
-
-    Ok(Some(StoredNodeState {
-        kind: parse_kind(kind.as_str())?,
-        state: join_state(&state_group, &state_value)?,
-    }))
-}
-
-struct StoredNodeState {
-    kind: NodeKind,
-    state: NodeState,
 }
 
 fn split_state(state: &NodeState) -> (&'static str, &'static str) {

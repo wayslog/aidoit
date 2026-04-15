@@ -6,17 +6,24 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
 use sha2::{Digest, Sha256};
 
 use crate::{
     domain::{
-        NodeKind, NodeRecord, NodeState, PhaseState, RawEventKind, RawEventPayload, RelationKind,
-        ReviewState, StoredEvent, StoredEventMeta, WorkState, kind_name, stable_node_id,
+        ExecutionUnit, NodeKind, NodeRecord, NodeState, PhaseState, RawEventKind, RawEventPayload,
+        RelationKind, ReviewState, StoredEvent, StoredEventMeta, WorkState, kind_name,
+        resolve_execution_unit, stable_node_id_for_unit,
     },
-    ingest::{find_latest_transcript_for_repo, import_codex_transcript},
-    store::{IngestCheckpoint, NodeView, RelationView, Store},
+    ingest::{
+        find_latest_transcript_for_project_with_unit_in, import_codex_transcript_for_unit,
+        resolve_transcript_execution_unit,
+    },
+    store::{
+        AgendaSubjectKind, GlobalAgendaLens, IngestCheckpoint, InspectScope, NodeView,
+        RelationView, Store, UnitScope,
+    },
 };
 
 #[derive(Debug, Parser)]
@@ -38,6 +45,11 @@ enum Commands {
     Status,
     Tree,
     Agenda,
+    Units,
+    Global {
+        #[command(subcommand)]
+        command: GlobalCommands,
+    },
     Principles,
     Inspect {
         #[arg(value_name = "ID_OR_PREFIX")]
@@ -64,8 +76,36 @@ enum Commands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum GlobalCommands {
+    Agenda {
+        #[arg(long, value_enum)]
+        lens: GlobalAgendaLensArg,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum GlobalAgendaLensArg {
+    Urgent,
+    Easy,
+    Mainline,
+    LowSwitch,
+}
+
+impl From<GlobalAgendaLensArg> for GlobalAgendaLens {
+    fn from(value: GlobalAgendaLensArg) -> Self {
+        match value {
+            GlobalAgendaLensArg::Urgent => GlobalAgendaLens::Urgent,
+            GlobalAgendaLensArg::Easy => GlobalAgendaLens::Easy,
+            GlobalAgendaLensArg::Mainline => GlobalAgendaLens::Mainline,
+            GlobalAgendaLensArg::LowSwitch => GlobalAgendaLens::LowSwitch,
+        }
+    }
+}
+
 struct AppContext {
-    repo_root: PathBuf,
+    execution_unit: ExecutionUnit,
     db_path: PathBuf,
     transcript: Option<PathBuf>,
 }
@@ -77,15 +117,20 @@ pub fn run() -> Result<()> {
     store.initialize()?;
 
     ensure_imported(&mut store, &context)?;
+    store.sync_project_execution_units(&context.execution_unit)?;
 
     let output = match cli.command {
-        Commands::Status => render_status(&store)?,
-        Commands::Tree => render_tree(&store)?,
-        Commands::Agenda => render_agenda(&store)?,
-        Commands::Principles => render_principles(&store)?,
-        Commands::Inspect { id } => render_inspect(&store, &id)?,
+        Commands::Status => render_status(&store, &context)?,
+        Commands::Tree => render_tree(&store, &context)?,
+        Commands::Agenda => render_agenda(&store, &context)?,
+        Commands::Units => render_units(&store, &context)?,
+        Commands::Global { command } => match command {
+            GlobalCommands::Agenda { lens } => render_global_agenda(&store, &context, lens.into())?,
+        },
+        Commands::Principles => render_principles(&store, &context)?,
+        Commands::Inspect { id } => render_inspect(&store, &context, &id)?,
         Commands::SetStatus { id, status } => {
-            let node = resolve_node(&store, &id)?;
+            let node = resolve_node(&store, &context, &id)?;
             apply_work_status(&mut store, &context, &node, &status)?;
             format!(
                 "状态已更新：{} ({}) -> {status}",
@@ -94,17 +139,17 @@ pub fn run() -> Result<()> {
             )
         }
         Commands::Confirm { id } => {
-            let node = resolve_node(&store, &id)?;
+            let node = resolve_node(&store, &context, &id)?;
             apply_review_status(&mut store, &context, &node, ReviewState::Confirmed)?;
             format!("已确认：{} ({})", node.title, short_id(&node.id))
         }
         Commands::Reject { id } => {
-            let node = resolve_node(&store, &id)?;
+            let node = resolve_node(&store, &context, &id)?;
             apply_review_status(&mut store, &context, &node, ReviewState::Rejected)?;
             format!("已拒绝：{} ({})", node.title, short_id(&node.id))
         }
         Commands::Promote { id, title } => {
-            let node = resolve_node(&store, &id)?;
+            let node = resolve_node(&store, &context, &id)?;
             let promoted = promote_branch(&mut store, &context, &node, title.as_deref())?;
             format!(
                 "已提升为任务：{} ({})",
@@ -121,16 +166,19 @@ pub fn run() -> Result<()> {
 fn resolve_context(cli: &Cli) -> Result<AppContext> {
     let start_dir = cli.repo_root.clone().unwrap_or(std::env::current_dir()?);
     let repo_root = normalize_repo_root(&start_dir);
+    let execution_unit = resolve_execution_unit(&repo_root)?
+        .unwrap_or_else(|| ExecutionUnit::legacy_main(repo_root.to_string_lossy().to_string()))
+        .with_active(true);
     let db_path = match &cli.db_path {
         Some(path) => path.clone(),
-        None => default_db_path(&repo_root)?,
+        None => default_db_path(&execution_unit)?,
     };
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
     Ok(AppContext {
-        repo_root,
+        execution_unit,
         db_path,
         transcript: cli.transcript.clone(),
     })
@@ -151,11 +199,11 @@ fn discover_repo_root(path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn default_db_path(repo_root: &Path) -> Result<PathBuf> {
+fn default_db_path(execution_unit: &ExecutionUnit) -> Result<PathBuf> {
     let project_dirs =
         ProjectDirs::from("io", "wayslog", "aidoit").context("无法确定本地数据目录")?;
     let repo_key = {
-        let digest = Sha256::digest(repo_root.to_string_lossy().as_bytes());
+        let digest = Sha256::digest(execution_unit.project_id.as_bytes());
         let digest = format!("{digest:x}");
         digest[..16].to_string()
     };
@@ -166,24 +214,55 @@ fn default_db_path(repo_root: &Path) -> Result<PathBuf> {
 }
 
 fn ensure_imported(store: &mut Store, context: &AppContext) -> Result<()> {
-    let transcript = match &context.transcript {
-        Some(path) => Some(path.clone()),
-        None => find_latest_transcript_for_repo(&context.repo_root)?,
+    let discovered = match &context.transcript {
+        Some(path) => Some((path.clone(), resolve_import_execution_unit(context, path)?)),
+        None => find_latest_transcript_for_project_with_unit_in(
+            &context.execution_unit,
+            &default_sessions_root()?,
+        )?
+        .map(|discovered| (discovered.path, discovered.execution_unit)),
     };
 
-    if let Some(path) = transcript {
-        import_codex_transcript(store, context.repo_root.to_string_lossy().as_ref(), path)?;
+    if let Some((path, execution_unit)) = discovered {
+        import_codex_transcript_for_unit(store, &execution_unit, path)?;
     }
 
     Ok(())
 }
 
-fn render_status(store: &Store) -> Result<String> {
-    let nodes = store.list_nodes()?;
-    let relations = store.list_relations()?;
-    let tasks = nodes_of_kind(&nodes, NodeKind::Task);
-    let blocked = work_nodes_by_state(&nodes, WorkState::Blocked);
-    let candidates = agenda_items(&nodes, &relations);
+fn resolve_import_execution_unit(
+    context: &AppContext,
+    transcript_path: &Path,
+) -> Result<ExecutionUnit> {
+    let parsed = resolve_transcript_execution_unit(transcript_path);
+    match parsed {
+        Ok(Some(execution_unit)) => {
+            let is_active = execution_unit.unit_id == context.execution_unit.unit_id;
+            Ok(execution_unit.with_active(is_active))
+        }
+        Ok(None) if context.execution_unit.project_id == context.execution_unit.project_root => {
+            Ok(context.execution_unit.clone())
+        }
+        Ok(None) => bail!("无法从 transcript 解析 execution unit，请检查 transcript 的 cwd 元数据"),
+        Err(_) if context.execution_unit.project_id == context.execution_unit.project_root => {
+            Ok(context.execution_unit.clone())
+        }
+        Err(error) => Err(error).context("无法从 transcript 解析 execution unit"),
+    }
+}
+
+fn default_sessions_root() -> Result<PathBuf> {
+    let home = directories::BaseDirs::new()
+        .map(|dirs| dirs.home_dir().to_path_buf())
+        .context("无法确定 home 目录")?;
+    Ok(home.join(".codex").join("sessions"))
+}
+
+fn render_status(store: &Store, context: &AppContext) -> Result<String> {
+    let scope = load_unit_scope(store, context)?;
+    let tasks = nodes_of_kind(&scope.nodes, NodeKind::Task);
+    let blocked = work_nodes_by_state(&scope.nodes, WorkState::Blocked);
+    let candidates = agenda_items(&scope.nodes, &scope.relations);
 
     let mut lines = Vec::new();
     lines.push("主线任务".to_string());
@@ -218,15 +297,16 @@ fn render_status(store: &Store) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-fn render_tree(store: &Store) -> Result<String> {
-    let nodes = store.list_nodes()?;
-    let relations = store.list_relations()?;
-    let node_map = node_map(&nodes);
-    let child_relations: Vec<_> = relations
+fn render_tree(store: &Store, context: &AppContext) -> Result<String> {
+    let scope = load_unit_scope(store, context)?;
+    let node_map = node_map(&scope.nodes);
+    let child_relations: Vec<_> = scope
+        .relations
         .iter()
         .filter(|relation| relation.relation == RelationKind::ChildOf)
         .collect();
-    let derived_relations: Vec<_> = relations
+    let derived_relations: Vec<_> = scope
+        .relations
         .iter()
         .filter(|relation| relation.relation == RelationKind::DerivedFrom)
         .collect();
@@ -245,7 +325,8 @@ fn render_tree(store: &Store) -> Result<String> {
         .iter()
         .map(|relation| relation.source_id.as_str())
         .collect();
-    let mut root_tasks: Vec<_> = nodes
+    let mut root_tasks: Vec<_> = scope
+        .nodes
         .iter()
         .filter(|node| node.kind == NodeKind::Task)
         .filter(|node| !child_targets.contains(&node.id.as_str()))
@@ -283,10 +364,9 @@ fn render_tree(store: &Store) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-fn render_agenda(store: &Store) -> Result<String> {
-    let nodes = store.list_nodes()?;
-    let relations = store.list_relations()?;
-    let agenda = agenda_items(&nodes, &relations);
+fn render_agenda(store: &Store, context: &AppContext) -> Result<String> {
+    let scope = load_unit_scope(store, context)?;
+    let agenda = agenda_items(&scope.nodes, &scope.relations);
 
     let mut lines = vec!["Agenda".to_string()];
     if agenda.is_empty() {
@@ -299,8 +379,94 @@ fn render_agenda(store: &Store) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-fn render_principles(store: &Store) -> Result<String> {
-    let nodes = store.list_nodes()?;
+fn render_units(store: &Store, context: &AppContext) -> Result<String> {
+    let summaries = store.load_project_unit_summaries(&context.execution_unit)?;
+    let mut lines = vec!["执行单元".to_string()];
+
+    for summary in summaries {
+        let mut tags = Vec::new();
+        if summary.is_current {
+            tags.push("当前");
+        }
+        if summary.execution_unit.is_active {
+            tags.push("激活");
+        }
+        let tags = if tags.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", tags.join("/"))
+        };
+        lines.push(format!(
+            "- {}{} {}",
+            execution_unit_kind_name(summary.execution_unit.unit_kind),
+            tags,
+            summary.execution_unit.unit_root
+        ));
+        lines.push(format!(
+            "  branch: {}",
+            summary
+                .execution_unit
+                .branch_ref
+                .as_deref()
+                .unwrap_or("(detached)")
+        ));
+        lines.push(format!(
+            "  head: {}",
+            summary
+                .execution_unit
+                .head_oid
+                .as_deref()
+                .map(short_id)
+                .unwrap_or("unknown")
+        ));
+        lines.push(format!(
+            "  统计: ready={} blocked={} done={} parked={}",
+            summary.work_counts.ready,
+            summary.work_counts.blocked,
+            summary.work_counts.done,
+            summary.work_counts.parked
+        ));
+        if let Some(main_task) = summary.main_task {
+            lines.push(format!("  主线: {}", main_task.title));
+        }
+    }
+
+    Ok(lines.join("\n"))
+}
+
+fn render_global_agenda(
+    store: &Store,
+    context: &AppContext,
+    lens: GlobalAgendaLens,
+) -> Result<String> {
+    let agenda = store.load_global_agenda(&context.execution_unit, lens, 5)?;
+    let mut lines = vec![
+        "全局 Agenda".to_string(),
+        format!("排序依据：{}", agenda.rationale),
+    ];
+
+    if agenda.items.is_empty() {
+        lines.push("- 暂无可推荐项".to_string());
+        return Ok(lines.join("\n"));
+    }
+
+    for (index, item) in agenda.items.iter().enumerate() {
+        lines.push(format!(
+            "{}. [{}] {} {} | unit: {} | 原因：{}",
+            index + 1,
+            execution_unit_kind_name(item.execution_unit.unit_kind),
+            agenda_subject_kind_name(item.subject_kind),
+            item.subject_title,
+            item.execution_unit.unit_root,
+            item.reason
+        ));
+    }
+
+    Ok(lines.join("\n"))
+}
+
+fn render_principles(store: &Store, context: &AppContext) -> Result<String> {
+    let nodes = store.list_project_principles(&context.execution_unit.project_id)?;
     let mut confirmed: Vec<_> = nodes
         .iter()
         .filter(|node| {
@@ -321,32 +487,32 @@ fn render_principles(store: &Store) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-fn render_inspect(store: &Store, node_ref: &str) -> Result<String> {
-    let node = resolve_node(store, node_ref)?;
-    let nodes = store.list_nodes()?;
-    let relations = store.list_relations()?;
-    let node_map = node_map(&nodes);
-    let events = store.list_raw_events()?;
+fn render_inspect(store: &Store, context: &AppContext, node_ref: &str) -> Result<String> {
+    let scope = load_inspect_scope(store, context, node_ref)?;
+    let node_map = node_map(&scope.nodes);
 
     let mut lines = vec![
         "节点".to_string(),
-        format!("- id: {}", node.id),
-        format!("- 类型: {}", kind_name(node.kind)),
-        format!("- 标题: {}", node.title),
-        format!("- 状态: {}", display_state(&node.state)),
+        format!("- id: {}", scope.node.id),
+        format!("- 类型: {}", kind_name(scope.node.kind)),
+        format!("- 标题: {}", scope.node.title),
+        format!("- 状态: {}", display_state(&scope.node.state)),
         String::new(),
         "关系".to_string(),
     ];
 
-    let related: Vec<_> = relations
+    let related: Vec<_> = scope
+        .relations
         .iter()
-        .filter(|relation| relation.source_id == node.id || relation.target_id == node.id)
+        .filter(|relation| {
+            relation.source_id == scope.node.id || relation.target_id == scope.node.id
+        })
         .collect();
     if related.is_empty() {
         lines.push("- 暂无关系".to_string());
     } else {
         for relation in related {
-            if relation.source_id == node.id {
+            if relation.source_id == scope.node.id {
                 let target = node_map
                     .get(relation.target_id.as_str())
                     .map(|node| format!("{} {}", kind_name(node.kind), node.title))
@@ -372,9 +538,10 @@ fn render_inspect(store: &Store, node_ref: &str) -> Result<String> {
 
     lines.push(String::new());
     lines.push("历史".to_string());
-    let history: Vec<_> = events
+    let history: Vec<_> = scope
+        .raw_events
         .into_iter()
-        .filter(|event| event_mentions_node(event, &node.id))
+        .filter(|event| event_mentions_node(event, &scope.node.id))
         .collect();
     if history.is_empty() {
         lines.push("- 暂无历史".to_string());
@@ -401,12 +568,7 @@ fn apply_work_status(
         bail!("只有 Task / Branch 支持工作流状态更新");
     }
     let state = NodeState::Work(parse_work_state(status)?);
-    let event = manual_state_event(
-        context.repo_root.to_string_lossy().as_ref(),
-        &node.id,
-        state,
-        "CLI 手动更新状态",
-    );
+    let event = manual_state_event(&context.execution_unit, &node.id, state, "CLI 手动更新状态");
     apply_manual_events(store, context, &[event])
 }
 
@@ -420,7 +582,7 @@ fn apply_review_status(
         bail!("只有 Principle / Agreement 支持确认流转");
     }
     let event = manual_state_event(
-        context.repo_root.to_string_lossy().as_ref(),
+        &context.execution_unit,
         &node.id,
         NodeState::Review(status),
         "CLI 手动确认状态",
@@ -438,11 +600,7 @@ fn promote_branch(
         bail!("只有 Branch 可以提升为任务");
     }
     let task_title = title.unwrap_or(branch.title.as_str());
-    let task_id = stable_node_id(
-        context.repo_root.to_string_lossy().as_ref(),
-        NodeKind::Task,
-        task_title,
-    );
+    let task_id = stable_node_id_for_unit(&context.execution_unit, NodeKind::Task, task_title);
     let task_state = match branch.state {
         NodeState::Work(state) => NodeState::Work(state),
         _ => NodeState::Work(WorkState::Parked),
@@ -451,9 +609,9 @@ fn promote_branch(
     let node_event_id = manual_event_id("promote-node", &seed);
     let relation_event_id = manual_event_id("promote-relation", &seed);
     let node_event = StoredEvent::from_meta(
-        StoredEventMeta::new(
+        StoredEventMeta::for_execution_unit(
             node_event_id.clone(),
-            context.repo_root.to_string_lossy().as_ref(),
+            &context.execution_unit,
             "cli://manual",
             line_no,
             "cli",
@@ -472,9 +630,9 @@ fn promote_branch(
         },
     );
     let relation_event = StoredEvent::from_meta(
-        StoredEventMeta::new(
+        StoredEventMeta::for_execution_unit(
             relation_event_id,
-            context.repo_root.to_string_lossy().as_ref(),
+            &context.execution_unit,
             "cli://manual",
             line_no + 1,
             "cli",
@@ -513,8 +671,8 @@ fn apply_manual_events(
         .last()
         .map(|event| event.occurred_at.as_str())
         .unwrap_or("manual-0");
-    let checkpoint = IngestCheckpoint::new(
-        context.repo_root.to_string_lossy(),
+    let checkpoint = IngestCheckpoint::for_execution_unit(
+        &context.execution_unit,
         "cli://manual",
         max_line_no,
         updated_at,
@@ -524,16 +682,16 @@ fn apply_manual_events(
 }
 
 fn manual_state_event(
-    repo_root: &str,
+    execution_unit: &ExecutionUnit,
     node_id: &str,
     state: NodeState,
     reason: &str,
 ) -> StoredEvent {
     let (line_no, occurred_at, seed) = manual_event_meta("state");
     StoredEvent::from_meta(
-        StoredEventMeta::new(
+        StoredEventMeta::for_execution_unit(
             manual_event_id("state", &seed),
-            repo_root,
+            execution_unit,
             "cli://manual",
             line_no,
             "cli",
@@ -599,6 +757,21 @@ fn relation_name(relation: RelationKind) -> &'static str {
         RelationKind::Supersedes => "supersedes",
         RelationKind::RelatedTo => "related_to",
         RelationKind::ChildOf => "child_of",
+    }
+}
+
+fn execution_unit_kind_name(kind: crate::domain::ExecutionUnitKind) -> &'static str {
+    match kind {
+        crate::domain::ExecutionUnitKind::MainRepo => "main_repo",
+        crate::domain::ExecutionUnitKind::LinkedWorktree => "linked_worktree",
+    }
+}
+
+fn agenda_subject_kind_name(kind: AgendaSubjectKind) -> &'static str {
+    match kind {
+        AgendaSubjectKind::Task => "task",
+        AgendaSubjectKind::Branch => "branch",
+        AgendaSubjectKind::Summary => "summary",
     }
 }
 
@@ -669,29 +842,23 @@ fn short_id(id: &str) -> &str {
     &id[..id.len().min(SHORT_ID_LEN)]
 }
 
-fn resolve_node(store: &Store, node_ref: &str) -> Result<NodeView> {
-    let nodes = store.list_nodes()?;
-    if let Some(node) = nodes.iter().find(|node| node.id == node_ref) {
-        return Ok(node.clone());
-    }
+fn resolve_node(store: &Store, context: &AppContext, node_ref: &str) -> Result<NodeView> {
+    Ok(load_inspect_scope(store, context, node_ref)?.node)
+}
 
-    let matches: Vec<_> = nodes
-        .iter()
-        .filter(|node| node.id.starts_with(node_ref))
-        .cloned()
-        .collect();
-    match matches.as_slice() {
-        [node] => Ok(node.clone()),
-        [] => bail!("节点不存在: {node_ref}"),
-        _ => {
-            let options = matches
-                .iter()
-                .map(|node| format!("- {}", format_node(node, true)))
-                .collect::<Vec<_>>()
-                .join("\n");
-            bail!("节点前缀不唯一: {node_ref}\n{options}");
-        }
-    }
+fn load_unit_scope(store: &Store, context: &AppContext) -> Result<UnitScope> {
+    store.load_unit_scope(
+        &context.execution_unit.project_id,
+        &context.execution_unit.unit_id,
+    )
+}
+
+fn load_inspect_scope(store: &Store, context: &AppContext, node_ref: &str) -> Result<InspectScope> {
+    store.load_inspect_scope(
+        &context.execution_unit.project_id,
+        &context.execution_unit.unit_id,
+        node_ref,
+    )
 }
 
 fn event_mentions_node(event: &StoredEvent, node_id: &str) -> bool {

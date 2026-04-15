@@ -177,3 +177,55 @@ fn 节点标题里的冒号会被完整保留() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn git_aware_repo_root_解析_execution_unit_失败时会直接报错() -> Result<()> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("broken-worktree");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(
+        repo_root.join(".git"),
+        "gitdir: /path/does/not/exist/gitdir\n",
+    )?;
+
+    let transcript = temp.path().join("session.jsonl");
+    fs::write(
+        &transcript,
+        concat!(
+            "{\"timestamp\":\"2026-04-14T04:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"session-1\",\"cwd\":\"/repo/demo\"}}\n",
+            "{\"timestamp\":\"2026-04-14T04:00:01.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"任务：不应静默回退\",\"images\":[],\"local_images\":[],\"text_elements\":[]}}\n"
+        ),
+    )?;
+
+    let mut store = Store::open_in_memory()?;
+    store.initialize()?;
+
+    let error = import_codex_transcript(
+        &mut store,
+        repo_root.to_string_lossy().as_ref(),
+        &transcript,
+    )
+    .unwrap_err();
+
+    assert!(format!("{error:#}").contains("execution unit"));
+
+    Ok(())
+}
+
+#[test]
+fn import_codex_transcript_兼容入口不会强行把_unit_写成_active() -> Result<()> {
+    let temp = tempdir()?;
+    let transcript = temp.path().join("session.jsonl");
+    fs::copy(FIXTURE, &transcript)?;
+
+    let mut store = Store::open_in_memory()?;
+    store.initialize()?;
+
+    import_codex_transcript(&mut store, "/repo/demo", &transcript)?;
+    let units = store.list_execution_units("/repo/demo")?;
+
+    assert_eq!(units.len(), 1);
+    assert!(units.iter().all(|unit| !unit.is_active));
+
+    Ok(())
+}

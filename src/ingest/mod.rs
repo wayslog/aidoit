@@ -5,9 +5,16 @@ use std::{fmt::Write, path::Path};
 
 use anyhow::{Context, Result};
 
-use crate::store::{IngestCheckpoint, Store};
+use crate::{
+    domain::{ExecutionUnit, resolve_execution_unit},
+    store::{IngestCheckpoint, Store},
+};
 
-pub use codex::find_latest_transcript_for_repo;
+pub use codex::{
+    DiscoveredTranscript, find_latest_transcript_for_project_in,
+    find_latest_transcript_for_project_with_unit_in, find_latest_transcript_for_repo,
+    resolve_transcript_execution_unit,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportReport {
@@ -18,17 +25,26 @@ pub struct ImportReport {
     pub last_line_no: u64,
 }
 
-pub fn import_codex_transcript(
+pub fn import_codex_transcript_for_unit(
     store: &mut Store,
-    repo_root: &str,
+    execution_unit: &ExecutionUnit,
     transcript_path: impl AsRef<Path>,
 ) -> Result<ImportReport> {
     let transcript_path = transcript_path.as_ref();
     let transcript_key = transcript_path_key(transcript_path);
     let checkpoint = store
-        .checkpoint(repo_root, &transcript_key)?
+        .checkpoint_for_unit(
+            &execution_unit.project_id,
+            &execution_unit.unit_id,
+            &transcript_key,
+        )?
         .unwrap_or_else(|| {
-            IngestCheckpoint::new(repo_root, &transcript_key, 0, "1970-01-01T00:00:00Z")
+            IngestCheckpoint::for_execution_unit(
+                execution_unit,
+                &transcript_key,
+                0,
+                "1970-01-01T00:00:00Z",
+            )
         });
     let parsed = codex::read_new_messages(transcript_path, checkpoint.last_line_no)
         .with_context(|| format!("读取 transcript 失败: {}", transcript_path.display()))?;
@@ -36,7 +52,7 @@ pub fn import_codex_transcript(
     let mut events = Vec::new();
     for message in &parsed.messages {
         events.extend(extract::extract_message_events(
-            repo_root,
+            execution_unit,
             &transcript_key,
             &parsed.session_id,
             message.line_no,
@@ -45,8 +61,8 @@ pub fn import_codex_transcript(
         )?);
     }
 
-    let next_checkpoint = IngestCheckpoint::new(
-        repo_root,
+    let next_checkpoint = IngestCheckpoint::for_execution_unit(
+        execution_unit,
         &transcript_key,
         parsed.total_lines,
         parsed
@@ -64,6 +80,17 @@ pub fn import_codex_transcript(
         inserted_raw_events: outcome.inserted_raw_events,
         last_line_no: parsed.total_lines,
     })
+}
+
+pub fn import_codex_transcript(
+    store: &mut Store,
+    repo_root: &str,
+    transcript_path: impl AsRef<Path>,
+) -> Result<ImportReport> {
+    let execution_unit = resolve_execution_unit(repo_root)
+        .with_context(|| format!("无法解析 execution unit: {repo_root}"))?
+        .unwrap_or_else(|| ExecutionUnit::legacy_main(repo_root.to_string()));
+    import_codex_transcript_for_unit(store, &execution_unit, transcript_path)
 }
 
 #[cfg(unix)]
